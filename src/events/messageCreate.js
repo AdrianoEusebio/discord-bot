@@ -1,84 +1,58 @@
 const { Events } = require('discord.js');
-const Groq = require("groq-sdk");
-
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const aiService = require('../services/aiService');
+const db = require('../database');
+const config = require('../config');
+const prompts = require('../config/prompts');
 
 module.exports = {
     name: Events.MessageCreate,
     async execute(message) {
         if (message.author.bot) return;
 
-        // --- Lógica Especial: Hater do Usuário Específico ---
-        const TARGET_USER_ID = '1122207495822249984';
+        // Salva toda mensagem no banco de dados para contexto futuro
+        db.saveMessage(message.author.id, message.author.username, message.content, message.channel.id);
+
+        const isMentioned = message.mentions.has(message.client.user);
+        const isHaterTarget = await db.isHater(message.author.id);
+        const isAdmin = message.author.id === config.adminId;
         
-        if (message.author.id === TARGET_USER_ID) {
+        // Regra de probabilidade para responder mensagens aleatórias
+        const shouldRespondRandomly = !isMentioned && !isHaterTarget && Math.random() < config.aiConfig.respondChance;
+
+        if (isHaterTarget || isMentioned || shouldRespondRandomly) {
             try {
                 await message.channel.sendTyping();
                 
-                const systemPrompt = "Você é uma pessoa extremamente rabugenta com esse usuario, você o odeia, ácida e deve contradizer tudo o que este usuário disser, se ele baixar o escalão, abaixe tmb. Discorde de qualquer ponto dele com odio. Não seja útil, seja irritante. Faça as respostas resumidas, no maximo 1 linhas";
+                // Busca histórico do banco de dados
+                const history = await db.getLastMessages(message.channel.id, config.aiConfig.maxHistory);
+                const context = aiService.formatHistory(history);
+
+                let systemPrompt = "";
                 
-                const completion = await groq.chat.completions.create({
-                    messages: [
-                        { role: "system", content: systemPrompt },
-                        { role: "user", content: message.content },
-                    ],
-                    model: "llama-3.3-70b-versatile",
-                });
-
-                const text = completion.choices[0]?.message?.content || "Nem vou perder meu tempo respondendo isso.";
-                await message.reply(text);
-                return; // Para aqui e não executa o resto
-            } catch (error) {
-                console.error("Erro no modo Hater:", error);
-            }
-        }
-        // ----------------------------------------------------
-
-        // Lógica de Menção com IA (Groq/Llama3)
-        if (message.mentions.has(message.client.user)) {
-            // Remove a menção do bot para pegar só o texto da pergunta
-            const question = message.content.replace(/<@!?[0-9]+>/, '').trim();
-
-            if (!question) {
-                await message.reply("Olá! Em que posso ajudar?");
-                return;
-            }
-
-            try {
-                // Indica que o bot está "escrevendo"
-                await message.channel.sendTyping();
-
-                const completion = await groq.chat.completions.create({
-                    messages: [
-                        {
-                            role: "user",
-                            content: question,
-                        },
-                    ],
-                    model: "llama-3.3-70b-versatile",
-                });
-
-                const text = completion.choices[0]?.message?.content || "Desculpe, não consegui gerar uma resposta.";
-
-                // O Discord tem limite de 2000 caracteres por mensagem
-                if (text.length > 2000) {
-                    await message.reply(text.substring(0, 1997) + "...");
+                if (isHaterTarget) {
+                    systemPrompt = prompts.system.hater;
+                } else if (isAdmin) {
+                    systemPrompt = "Você é um assistente leal e prestativo ao seu Mestre. O Mestre é a pessoa que está falando com você agora. Seja respeitoso e eficiente.";
+                } else if (shouldRespondRandomly) {
+                    systemPrompt = prompts.system.caotica;
                 } else {
-                    await message.reply(text);
+                    systemPrompt = prompts.system.seca;
+                }
+
+                const response = await aiService.getResponse(systemPrompt, context);
+                
+                const MAX_LENGTH = 2000;
+                if (response.length > MAX_LENGTH) {
+                    const chunks = response.match(new RegExp(`.{1,${MAX_LENGTH}}`, 'g'));
+                    for (const chunk of chunks) {
+                        await message.reply(chunk);
+                    }
+                } else {
+                    await message.reply(response);
                 }
             } catch (error) {
-                console.error("Erro na IA (Groq):", error);
-                await message.reply("Desculpe, tive um problema ao processar sua pergunta.");
+                console.error("Erro na lógica de resposta:", error);
             }
-            return;
-        }
-
-        // Lógica de Risada
-        const content = message.content.toLowerCase();
-        const risadas = /(kkk+|haha+|huehue|rsrs+|kkkk+|hehe+|ha ha)/i;
-
-        if (risadas.test(content)) {
-            await message.reply("Tá rindo de que?");
         }
     },
 };
